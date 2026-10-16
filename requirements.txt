@@ -1,0 +1,10 @@
+# ========================================================
+# Ping Scanner Dependencies
+# Python >= 3.10
+# ========================================================
+
+# GUI Framework
+PySide6>=6.5.0
+
+# (Optional) Standalone EXE packaging
+# pyinstaller>=6.0.0
