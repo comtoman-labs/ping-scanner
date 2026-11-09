@@ -16,7 +16,13 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+
+try:
+    import zeroconf
+except ImportError:
+    zeroconf = None
 
 from PySide6.QtCore import (
     QObject, QSortFilterProxyModel, Qt, QThread, Signal,
@@ -119,11 +125,163 @@ def get_mac(ip: str) -> str:
         return ""
 
 
-def get_hostname(ip: str) -> str:
+# ---------------------------------------------------------------- 호스트명 조회 (DNS / mDNS)
+_hostname_cache: dict[str, str] = {}
+_cache_lock = threading.Lock()
+_dns_executor = ThreadPoolExecutor(max_workers=32, thread_name_prefix="dns_resolver")
+
+
+def _resolve_dns_timeout(ip: str, timeout: float = 0.5) -> str:
+    """기존 DNS 역방향 조회 (socket.gethostbyaddr)를 타임아웃 제한 내에서 수행."""
     try:
-        return socket.gethostbyaddr(ip)[0]
-    except OSError:
+        future = _dns_executor.submit(socket.gethostbyaddr, ip)
+        res = future.result(timeout=timeout)
+        if res and res[0] and res[0] != ip:
+            return res[0]
+    except Exception:
+        pass
+    return ""
+
+
+def _parse_dns_name(data: bytes, offset: int) -> tuple[str, int]:
+    """DNS 패킷에서 포인터(0xC0) 압축을 지원하는 도메인 이름 파싱."""
+    labels = []
+    visited_offsets = set()
+    orig_offset = offset
+    stepped_back = False
+
+    while True:
+        if offset >= len(data):
+            break
+        length = data[offset]
+        if length == 0:
+            if not stepped_back:
+                orig_offset = offset + 1
+            break
+        elif (length & 0xC0) == 0xC0:
+            if offset + 1 >= len(data):
+                break
+            ptr = struct.unpack("!H", data[offset:offset + 2])[0] & 0x3FFF
+            if not stepped_back:
+                orig_offset = offset + 2
+                stepped_back = True
+            if ptr in visited_offsets:
+                break
+            visited_offsets.add(ptr)
+            offset = ptr
+        else:
+            offset += 1
+            label = data[offset:offset + length].decode("utf-8", errors="ignore")
+            labels.append(label)
+            offset += length
+            if not stepped_back:
+                orig_offset = offset
+
+    return ".".join(labels), orig_offset
+
+
+def _extract_ptr_target(data: bytes) -> str:
+    """mDNS 응답 패킷에서 PTR 레코드의 호스트명을 추출 (.local 제거)."""
+    if len(data) < 12:
         return ""
+    header = struct.unpack("!HHHHHH", data[:12])
+    qdcount, ancount, nscount, arcount = header[2], header[3], header[4], header[5]
+    offset = 12
+    # 질의 섹션 건너뛰기
+    for _ in range(qdcount):
+        _, offset = _parse_dns_name(data, offset)
+        offset += 4
+
+    total_rr = ancount + nscount + arcount
+    for _ in range(total_rr):
+        _, offset = _parse_dns_name(data, offset)
+        if offset + 10 > len(data):
+            break
+        rtype, rclass, ttl, rdlen = struct.unpack("!HHIH", data[offset:offset + 10])
+        offset += 10
+        rdata_end = offset + rdlen
+        if rtype == 12:  # PTR Record
+            target, _ = _parse_dns_name(data, offset)
+            target = re.sub(r"\.local\.?$", "", target, flags=re.IGNORECASE).strip()
+            if target:
+                return target
+        offset = rdata_end
+    return ""
+
+
+def _build_mdns_ptr_query(ip: str) -> bytes:
+    """IP 주소에 대한 mDNS PTR 질의 패킷 생성 (in-addr.arpa)."""
+    parts = ip.strip().split(".")
+    if len(parts) != 4:
+        return b""
+    rev_labels = list(reversed(parts)) + ["in-addr", "arpa"]
+    qname = b""
+    for label in rev_labels:
+        b_label = label.encode("ascii")
+        qname += bytes([len(b_label)]) + b_label
+    qname += b"\x00"
+    header = struct.pack("!HHHHHH", 0x0000, 0x0000, 1, 0, 0, 0)
+    # QTYPE=12 (PTR), QCLASS=0x8001 (QU - Unicast-response requested, RFC 6762)
+    question = qname + struct.pack("!HH", 12, 0x8001)
+    return header + question
+
+
+def _resolve_mdns_ptr(ip: str, timeout: float = 0.4) -> str:
+    """mDNS 멀티캐스트(224.0.0.251:5353)를 통해 IP의 PTR 호스트명 조회."""
+    query = _build_mdns_ptr_query(ip)
+    if not query:
+        return ""
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.settimeout(timeout)
+        sock.bind(("", 0))  # 임시 포트 바인딩으로 유니캐스트 응답 수신
+        sock.sendto(query, ("224.0.0.251", 5353))
+        try:
+            sock.sendto(query, (ip, 5353))  # 라우팅/VPN 환경 대비 직접 유니캐스트 보조 전송
+        except OSError:
+            pass
+
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                data, _ = sock.recvfrom(4096)
+                name = _extract_ptr_target(data)
+                if name:
+                    return name
+            except socket.timeout:
+                break
+            except OSError:
+                break
+    except Exception:
+        pass
+    finally:
+        sock.close()
+    return ""
+
+
+def get_hostname(ip: str) -> str:
+    """IP에 대응하는 호스트명 조회:
+    1. 메모리 캐시 확인
+    2. 기존 DNS 역방향 조회 (socket.gethostbyaddr, 타임아웃 0.5s)
+    3. mDNS 역방향 질의 (224.0.0.251:5353 PTR, 타임아웃 0.4s)
+    4. 최종 실패 시 빈 문자열 반환 (UI에서 IP 주소 표시)
+    """
+    with _cache_lock:
+        if ip in _hostname_cache:
+            return _hostname_cache[ip]
+
+    # 1. DNS 역방향 조회 (Windows / 도메인 네트워크 장비)
+    name = _resolve_dns_timeout(ip, timeout=0.5)
+
+    # 2. DNS 조회 실패 시 mDNS 역방향 질의 (Linux, Jetson, Raspberry Pi 등 Avahi)
+    if not name:
+        name = _resolve_mdns_ptr(ip, timeout=0.4)
+
+    with _cache_lock:
+        _hostname_cache[ip] = name
+
+    return name
 
 
 def make_dot_icon(color: str) -> QIcon:
@@ -567,6 +725,9 @@ class MainWindow(QMainWindow):
         menu.exec(self.view.viewport().mapToGlobal(pos))
 
     def reping(self, ips):
+        with _cache_lock:
+            for ip in ips:
+                _hostname_cache.pop(ip, None)
         timeout, use_arp, resolve = (self.spin_timeout.value(), self.chk_arp.isChecked(),
                                      self.chk_name.isChecked())
         self._notes = self._collect_notes()
@@ -612,6 +773,7 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait(5000)
+        _dns_executor.shutdown(wait=False, cancel_futures=True)
         super().closeEvent(e)
 
 

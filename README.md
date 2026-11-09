@@ -21,19 +21,24 @@ PySide6 기반의 가볍고 직관적인 **고속 멀티스레드 네트워크 I
 3. **🔍 방화벽(ICMP 차단) 장비 탐색 (ARP 기반 MAC 조회)**
    * Windows `SendARP` API를 탑재하여 ICMP 핑에 응답하지 않는 보안 장비도 MAC 주소로 활성화 여부(주황색 표시) 검출
 
-4. **🖥️ 실시간 편의 기능**
+4. **🌐 DNS & mDNS(Avahi/.local) 하이브리드 호스트명 자동 탐색**
+   * **Windows/도메인 장비**: 기존 시스템 DNS 역방향 조회(PTR)
+   * **Linux / Jetson / 라즈베리파이 등 임베디드 장비**: mDNS 멀티캐스트(`224.0.0.251:5353`) PTR 질의를 통해 `*.local` 호스트명을 자동 탐색하여 표시
+   * **속도 최적화**: 0.4초 초고속 타임아웃 및 메모리 캐싱으로 대량 스캔 속도 유지
+
+5. **🖥️ 실시간 편의 기능**
    * **켜진 장비만 보기**: 오프라인 장비 숨김 필터
    * **실시간 검색창**: IP, 호스트명, MAC, 메모 키워드로 즉시 필터링
    * **컬럼 정렬**: 상태, IP(숫자 정렬), 응답속도, TTL, MAC, 의견별 오름/내림차순 정렬
    * **다크 모드 / 라이트 모드 전환**: 상단 토글 버튼으로 깔끔한 테마 변경
    * **의견(메모) 작성**: 테이블 내 셀을 더블 클릭하여 장비별 메모 직접 입력
 
-5. **🖱️ 우클릭 컨텍스트 메뉴**
+6. **🖱️ 우클릭 컨텍스트 메뉴**
    * 선택 장비 다시 핑(Re-ping)
    * IP 복사 / MAC 주소 복사
    * 웹 접속 바로가기 (`http://IP`, `https://IP`)
 
-6. **💾 CSV 파일 내보내기**
+7. **💾 CSV 파일 내보내기**
    * 스캔 결과 및 작성한 메모를 CSV 파일로 저장
 
 ---
@@ -52,7 +57,7 @@ python ping_scanner.py
 
 ### 2. 독립 실행 파일 (.exe) 빌드
 **`build_exe.bat`** 파일을 실행하면 자동으로 PyInstaller를 통해 독립 실행 프로그램이 생성됩니다:
-* 빌드 결과: `dist/PingScanner.exe` (약 46MB 단일 파일)
+* 빌드 결과: `dist/PingScanner.exe` (단일 포터블 실행 파일)
 * **배포 권장**: 소스 코드에는 `.exe`를 커밋하지 않고, GitHub 저장소의 **Releases** 탭에 업로드하여 배포합니다.
 
 ---
@@ -61,9 +66,10 @@ python ping_scanner.py
 
 ```text
 ping-scanner/
-├── ping_scanner.py      # 프로그램 전체 UI 및 스캐너 코어 로직
+├── ping_scanner.py      # 프로그램 전체 UI 및 스캐너 코어 로직 (DNS/mDNS 지원)
+├── test_ping_scanner.py # 호스트명 조회 및 mDNS 단위 테스트
 ├── icon.ico             # 프로그램 및 창 아이콘
-├── requirements.txt     # 프로젝트 의존성 라이브러리 목록 (PySide6)
+├── requirements.txt     # 프로젝트 의존성 라이브러리 목록 (PySide6, zeroconf)
 ├── run.bat              # 가상환경 자동 감지 즉시 실행 배치 파일
 ├── build_exe.bat        # 독립형 .exe 단일 파일 빌드 자동화 스크립트
 ├── .gitignore           # GitHub 업로드 제외 설정
