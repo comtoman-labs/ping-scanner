@@ -5,6 +5,14 @@ PySide6 기반의 가볍고 직관적인 **고속 멀티스레드 네트워크 I
 
 ---
 
+## 🖥️ 프로그램 실행 화면
+
+<p align="center">
+  <img src="doc/screenshot.png" alt="Ping Scanner 실행 화면" width="100%">
+</p>
+
+---
+
 ## 🌟 주요 기능
 
 1. **🚀 초고속 멀티스레드 스캔**
@@ -66,6 +74,8 @@ python ping_scanner.py
 
 ```text
 ping-scanner/
+├── doc/
+│   └── screenshot.png   # 프로그램 실행 화면 스크린샷
 ├── ping_scanner.py      # 프로그램 전체 UI 및 스캐너 코어 로직 (DNS/mDNS 지원)
 ├── test_ping_scanner.py # 호스트명 조회 및 mDNS 단위 테스트
 ├── icon.ico             # 프로그램 및 창 아이콘
